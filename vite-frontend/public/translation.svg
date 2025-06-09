@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100" height="100">
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- 배경 원 -->
+  <circle cx="50" cy="50" r="45" fill="url(#grad1)" stroke="#ffffff" stroke-width="2"/>
+  
+  <!-- 지구본 -->
+  <circle cx="50" cy="50" r="25" fill="none" stroke="#ffffff" stroke-width="2"/>
+  <ellipse cx="50" cy="50" rx="25" ry="12" fill="none" stroke="#ffffff" stroke-width="1.5"/>
+  <ellipse cx="50" cy="50" rx="12" ry="25" fill="none" stroke="#ffffff" stroke-width="1.5"/>
+  <line x1="25" y1="50" x2="75" y2="50" stroke="#ffffff" stroke-width="1.5"/>
+  
+  <!-- 번역 화살표 -->
+  <path d="M35 35 L45 25 M35 35 L25 45" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <path d="M65 65 L55 75 M65 65 L75 55" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round"/>
+  
+  <!-- 언어 기호 -->
+  <text x="32" y="28" font-family="Arial, sans-serif" font-size="8" fill="#ffffff" font-weight="bold">A</text>
+  <text x="68" y="78" font-family="Arial, sans-serif" font-size="8" fill="#ffffff" font-weight="bold">가</text>
+</svg> 

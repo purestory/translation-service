@@ -1,0 +1,1252 @@
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const router = express.Router();
+const TranslationService = require('../services/translationService');
+const SubtitleParser = require('../utils/subtitleParser');
+
+const translationService = new TranslationService();
+
+// Multer 설정
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = path.join(__dirname, '../uploads');
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['.srt', '.smi', '.vtt', '.ass'];
+  const fileExt = path.extname(file.originalname).toLowerCase();
+  
+  if (allowedTypes.includes(fileExt)) {
+    cb(null, true);
+  } else {
+    cb(new Error('지원하지 않는 파일 형식입니다. SRT, SMI, VTT 파일만 업로드 가능합니다.'), false);
+  }
+};
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB
+  },
+  fileFilter: fileFilter
+});
+
+// 자막 파일 업로드 및 분석
+router.post('/upload', upload.single('subtitle'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: '파일이 업로드되지 않았습니다.'
+      });
+    }
+
+    console.log(`자막 파일 업로드: ${req.file.originalname} (${req.file.size} bytes)`);
+
+    // 원본 파일명 정보를 메타 파일로 저장
+    const metaPath = path.join(__dirname, '../uploads', req.file.filename + '.meta');
+    const metaData = {
+      originalName: req.file.originalname,
+      uploadTime: new Date().toISOString(),
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype
+    };
+    fs.writeFileSync(metaPath, JSON.stringify(metaData), 'utf8');
+
+    // 파일 파싱
+    const parsed = SubtitleParser.parseSubtitle(req.file.path);
+    const stats = SubtitleParser.getSubtitleStats(parsed.entries);
+
+    // 파일 정보 응답
+    res.json({
+      success: true,
+      data: {
+        fileId: req.file.filename,
+        originalName: req.file.originalname,
+        format: parsed.format,
+        stats: stats,
+        preview: parsed.entries.slice(0, 3), // 처음 3개 엔트리 미리보기
+        uploadTime: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('파일 업로드 오류:', error);
+    
+    // 업로드된 파일 삭제
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+
+    res.status(500).json({
+      success: false,
+      error: error.message || '파일 처리 중 오류가 발생했습니다.'
+    });
+  }
+});
+
+// 진행 상태를 저장할 전역 객체
+const translationProgress = {};
+
+// 진행 상태 조회 엔드포인트 추가
+router.get('/progress/:fileId', (req, res) => {
+  const fileId = req.params.fileId;
+  const progress = translationProgress[fileId];
+  
+  if (!progress) {
+    return res.status(404).json({
+      success: false,
+      error: '진행 중인 번역을 찾을 수 없습니다.'
+    });
+  }
+  
+  res.json({
+    success: true,
+    data: progress
+  });
+});
+
+// 대체 번역 엔진 시도 함수
+async function tryFallbackTranslation(text, targetLang, sourceLang, currentEngine) {
+  // 사용 가능한 엔진 목록 (Groq과 Gemini만 사용)
+  const engines = ['groq', 'gemini'];
+  const fallbackEngines = engines.filter(engine => engine !== currentEngine);
+  
+  console.log(`\n🛡️ 대체 번역 시도:`);
+  console.log(`   ❌ 실패 엔진: ${currentEngine}`);
+  console.log(`   🔄 시도할 엔진들: [${fallbackEngines.join(', ')}]`);
+  console.log(`   📝 번역할 텍스트: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+  console.log(`   🎯 번역 방향: ${sourceLang || 'auto'} → ${targetLang}`);
+  
+  for (let i = 0; i < fallbackEngines.length; i++) {
+    const fallbackEngine = fallbackEngines[i];
+    console.log(`\n   🤖 [${i+1}/${fallbackEngines.length}] ${fallbackEngine} 엔진 시도 중...`);
+    
+    try {
+      const startTime = Date.now();
+      const result = await translationService.translate(
+        text,
+        targetLang,
+        sourceLang,
+        fallbackEngine
+      );
+      const duration = Date.now() - startTime;
+      
+      if (result && result.translatedText && result.translatedText.trim()) {
+        console.log(`   ✅ ${fallbackEngine} 엔진 대체 번역 성공! (${duration}ms)`);
+        console.log(`   📤 번역 결과: "${result.translatedText.substring(0, 100)}${result.translatedText.length > 100 ? '...' : ''}"`);
+        console.log(`   📊 원본: ${text.length}자 → 번역: ${result.translatedText.length}자`);
+        return result.translatedText;
+      } else {
+        console.warn(`   ⚠️ ${fallbackEngine} 엔진 응답 없음 또는 비어있음`);
+      }
+    } catch (error) {
+      console.error(`   ❌ ${fallbackEngine} 엔진 대체 번역 실패: ${error.message}`);
+      if (error.stack) {
+        console.error(`   📍 스택 트레이스: ${error.stack.split('\n')[1]}`);
+      }
+      continue;
+    }
+  }
+  
+  // 모든 엔진이 실패한 경우
+  console.error(`\n💥 모든 대체 엔진 실패!`);
+  console.error(`   📝 텍스트: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
+  console.error(`   🎯 번역 방향: ${sourceLang || 'auto'} → ${targetLang}`);
+  console.error(`   🤖 시도한 엔진들: [${fallbackEngines.join(', ')}]`);
+  
+  return `[번역실패] ${text}`;
+}
+
+// 자막 파일 번역
+router.post('/translate', async (req, res) => {
+  try {
+    const { 
+      fileId, 
+      targetLang, 
+      sourceLang, 
+      engine = 'gemini', 
+      outputFormat,
+      chunkSize = 50,              // 청크 크기 (기본값: 50)
+      translationMode = 'auto',    // 번역 방식: 'srt_direct', 'separator', 'auto'
+      maxRetries = 5,              // 최대 재시도 횟수
+      retryDelay = 1000,           // 재시도 간격 (ms)
+      enableFallback = true        // 대체 엔진 사용 여부
+    } = req.body;
+
+    // 📋 상세 요청 로그
+    console.log('\n='.repeat(80));
+    console.log('🎯 번역 요청 시작');
+    console.log('='.repeat(80));
+    console.log(`📂 파일 ID: ${fileId}`);
+    console.log(`🌐 원본 언어: ${sourceLang || 'auto'}`);
+    console.log(`🎯 목표 언어: ${targetLang}`);
+    console.log(`🤖 번역 엔진: ${engine}`);
+    console.log(`📄 출력 형식: ${outputFormat || 'auto'}`);
+    console.log(`📦 청크 크기: ${chunkSize}`);
+    console.log(`⚙️ 번역 모드: ${translationMode}`);
+    console.log(`🔄 최대 재시도: ${maxRetries}`);
+    console.log(`⏱️ 재시도 간격: ${retryDelay}ms`);
+    console.log(`🛡️ 대체 엔진: ${enableFallback ? '활성화' : '비활성화'}`);
+    console.log(`⏰ 요청 시간: ${new Date().toISOString()}`);
+    console.log('='.repeat(80));
+
+    if (!fileId || !targetLang) {
+      return res.status(400).json({
+        success: false,
+        error: '필수 매개변수가 누락되었습니다.',
+        required: ['fileId', 'targetLang'],
+        optional: {
+          chunkSize: '청크 크기 (기본값: 50)',
+          translationMode: '번역 방식 - auto(자동), srt_direct(SRT직접), separator(구분자)',
+          maxRetries: '최대 재시도 횟수 (기본값: 5)',
+          retryDelay: '재시도 간격 밀리초 (기본값: 1000)',
+          enableFallback: '대체 엔진 사용 여부 (기본값: true)'
+        }
+      });
+    }
+
+    // 🧹 기존 번역 파일들 삭제
+    console.log('\n🧹 기존 번역 파일 정리 시작...');
+    const uploadsDir = path.join(__dirname, '../uploads');
+    const files = fs.readdirSync(uploadsDir);
+    let deletedCount = 0;
+    
+    files.forEach(file => {
+      if (file.includes('_translated_') && (file.endsWith('.srt') || file.endsWith('.vtt') || file.endsWith('.ass') || file.endsWith('.meta'))) {
+        try {
+          fs.unlinkSync(path.join(uploadsDir, file));
+          deletedCount++;
+          console.log(`   ❌ 삭제: ${file}`);
+        } catch (error) {
+          console.warn(`   ⚠️ 삭제 실패: ${file} - ${error.message}`);
+        }
+      }
+    });
+    console.log(`✅ 기존 번역 파일 ${deletedCount}개 삭제 완료\n`);
+
+    // 옵션 검증
+    const validatedChunkSize = Math.max(1, Math.min(parseInt(chunkSize) || 50, 1000)); // 1-1000 범위
+    const validatedMaxRetries = Math.max(1, Math.min(parseInt(maxRetries) || 5, 10)); // 1-10 범위
+    const validatedRetryDelay = Math.max(100, Math.min(parseInt(retryDelay) || 1000, 10000)); // 100ms-10s 범위
+    const validTranslationModes = ['auto', 'srt_direct', 'separator'];
+    const validatedTranslationMode = validTranslationModes.includes(translationMode) ? translationMode : 'auto';
+
+    console.log(`🔧 검증된 번역 옵션:`);
+    console.log(`   📦 청크 크기: ${validatedChunkSize}개 (요청: ${chunkSize})`);
+    console.log(`   ⚙️ 번역 방식: ${validatedTranslationMode} (요청: ${translationMode})`);
+    console.log(`   🔄 최대 재시도: ${validatedMaxRetries}회 (요청: ${maxRetries})`);
+    console.log(`   ⏱️ 재시도 간격: ${validatedRetryDelay}ms (요청: ${retryDelay})`);
+    console.log(`   🛡️ 대체 엔진: ${enableFallback ? '활성화' : '비활성화'}`);
+
+    // 업로드된 파일 경로
+    const filePath = path.join(__dirname, '../uploads', fileId);
+    
+    if (!fs.existsSync(filePath)) {
+      console.error(`❌ 파일을 찾을 수 없음: ${filePath}`);
+      return res.status(404).json({
+        success: false,
+        error: '파일을 찾을 수 없습니다.'
+      });
+    }
+
+    console.log(`✅ 원본 파일 확인: ${filePath}`);
+
+    // 원본 파일명 정보 파일 경로
+    const metaPath = path.join(__dirname, '../uploads', fileId + '.meta');
+    let originalName = fileId;
+    
+    // 메타 정보에서 원본 파일명 읽기
+    if (fs.existsSync(metaPath)) {
+      try {
+        const metaData = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+        originalName = metaData.originalName || fileId;
+        console.log(`📋 메타 정보 로드: ${originalName}`);
+      } catch (error) {
+        console.warn(`⚠️ 메타 파일 읽기 오류: ${error.message}`);
+      }
+    } else {
+      console.log(`📋 메타 파일 없음, 파일ID 사용: ${fileId}`);
+    }
+
+    console.log(`\n🎬 자막 번역 시작:`);
+    console.log(`   📁 원본: ${originalName}`);
+    console.log(`   🆔 파일ID: ${fileId}`);
+    console.log(`   🎯 ${sourceLang || 'auto'} → ${targetLang}`);
+    console.log(`   🤖 엔진: ${engine}`);
+
+    // 파일 파싱
+    console.log(`\n📖 파일 파싱 중...`);
+    const parsed = SubtitleParser.parseSubtitle(filePath);
+    const entries = parsed.entries;
+    
+    console.log(`✅ 파싱 완료:`);
+    console.log(`   📄 형식: ${parsed.format}`);
+    console.log(`   📝 자막 수: ${entries.length}개`);
+
+    if (entries.length === 0) {
+      console.error(`❌ 자막 엔트리가 없음`);
+      return res.status(400).json({
+        success: false,
+        error: '자막 엔트리가 없습니다.'
+      });
+    }
+
+    // 총 글자수 계산
+    const totalCharacters = entries.reduce((sum, entry) => sum + entry.text.length, 0);
+    const avgTextLength = totalCharacters / entries.length;
+    
+    console.log(`📊 자막 통계:`);
+    console.log(`   💬 총 글자수: ${totalCharacters.toLocaleString()}자`);
+    console.log(`   📏 평균 길이: ${Math.round(avgTextLength)}자/자막`);
+    console.log(`   ⏱️ 예상 번역시간: ${Math.round(totalCharacters / 1000)}초 (1000자/초 기준)`);
+
+    // 진행 상태 초기화
+    translationProgress[fileId] = {
+      status: 'processing',
+      progress: 0,
+      totalEntries: entries.length,
+      processedEntries: 0,
+      totalCharacters: totalCharacters,
+      processedCharacters: 0,
+      startTime: Date.now(),
+      currentChunk: 0,
+      totalChunks: 0,
+      estimatedTimeRemaining: 0,
+      averageCharsPerSecond: 0,
+      message: '번역 준비 중...'
+    };
+
+    // 자막을 적절한 크기의 청크로 분할 (옵션 기반)
+    const maxChunkSize = validatedChunkSize;
+    
+    console.log(`평균 텍스트 길이: ${Math.round(avgTextLength)}자, 엔진: ${engine}, 청크 크기: ${maxChunkSize}개 (옵션 설정)`);
+
+    const totalChunks = Math.ceil(entries.length / maxChunkSize);
+    translationProgress[fileId].totalChunks = totalChunks;
+    translationProgress[fileId].message = `총 ${totalChunks}개 청크로 번역 진행 (청크당 ${maxChunkSize}개, 방식: ${validatedTranslationMode})`;
+
+    console.log(`배치 번역 설정: 엔진=${engine}, 청크크기=${maxChunkSize}, 총 자막=${entries.length}개, 총 글자수=${totalCharacters}자`);
+
+    const translatedEntries = [];
+    let totalProcessed = 0;
+    let totalProcessedChars = 0;
+    const startTime = Date.now();
+
+    for (let i = 0; i < entries.length; i += maxChunkSize) {
+      const currentChunkIndex = Math.floor(i / maxChunkSize) + 1;
+      const totalChunks = Math.ceil(entries.length / maxChunkSize);
+      const chunk = entries.slice(i, i + maxChunkSize);
+      const chunkChars = chunk.reduce((sum, entry) => sum + entry.text.length, 0);
+      
+      // 번역 요청 전 로깅
+      const chunkStartTime = Date.now();
+
+      // 번역 모드 결정 로직
+      let shouldUseSrtDirect = false;
+      let shouldUseSeparator = false;
+      
+      // SRT 형식이고 srt_direct 모드인 경우
+      if (validatedTranslationMode === 'srt_direct' && (parsed.format === 'srt' || parsed.format === 'vtt')) {
+        shouldUseSrtDirect = true;
+      } else if (validatedTranslationMode === 'separator') {
+        shouldUseSeparator = true;
+      } else {
+        // auto 모드: 조건에 따라 자동 결정
+        if (parsed.format === 'srt' && chunk.length <= 10) {
+          shouldUseSrtDirect = true;
+        } else {
+          shouldUseSeparator = true;
+        }
+      }
+
+      if (shouldUseSrtDirect) {
+        // 🎯 SRT 청크 직접 번역
+        const srtChunk = SubtitleParser.generateSubtitle(chunk, 'srt');
+        console.log(`🆕 SRT 청크 ${currentChunkIndex}/${totalChunks} 직접 번역 시작 (${chunk.length}개 자막, ${srtChunk.length}자)`);
+        console.log(`SRT 청크 미리보기: ${srtChunk.substring(0, 200)}...`);
+      
+      let result;
+        let translatedTexts = [];
+      let retryCount = 0;
+      
+        // 재시도 로직으로 안정성 강화
+        while (retryCount <= validatedMaxRetries) {
+          try {
+            // SRT 청크 직접 번역
+            result = await translationService.translate(
+              srtChunk, 
+              targetLang, 
+              sourceLang, 
+              engine
+            );
+            
+            console.log(`청크 ${currentChunkIndex} 번역 응답 길이: ${result.translatedText.length}자`);
+            console.log(`청크 ${currentChunkIndex} 번역 응답 미리보기: ${result.translatedText.substring(0, 300)}...`);
+            
+            // 번역된 SRT에서 텍스트만 추출
+            const translatedSrtLines = result.translatedText.split('\n');
+            translatedTexts = [];
+            
+            for (let lineIndex = 0; lineIndex < translatedSrtLines.length; lineIndex++) {
+              const line = translatedSrtLines[lineIndex].trim();
+              
+              // 숫자 라인이면 다음이 타임스탬프, 그 다음이 텍스트
+              if (/^\d+$/.test(line)) {
+                // 타임스탬프 라인 건너뛰기
+                lineIndex++;
+                if (lineIndex < translatedSrtLines.length && translatedSrtLines[lineIndex].includes('-->')) {
+                  lineIndex++;
+                  // 텍스트 라인(들) 수집
+                  let textLines = [];
+                  while (lineIndex < translatedSrtLines.length && 
+                         translatedSrtLines[lineIndex].trim() !== '' && 
+                         !/^\d+$/.test(translatedSrtLines[lineIndex].trim())) {
+                    textLines.push(translatedSrtLines[lineIndex].trim());
+                    lineIndex++;
+                  }
+                  if (textLines.length > 0) {
+                    translatedTexts.push(textLines.join('\n'));
+                  }
+                  lineIndex--; // for 루프에서 증가하므로 하나 빼기
+                }
+              }
+            }
+            
+            // 추출된 텍스트 개수 확인
+            if (translatedTexts.length === chunk.length) {
+              console.log(`✅ SRT 청크 ${currentChunkIndex} 직접 번역 성공: ${translatedTexts.length}개 텍스트 추출`);
+              break; // 성공하면 루프 탈출
+            } else {
+              throw new Error(`텍스트 개수 불일치: 예상=${chunk.length}, 실제=${translatedTexts.length}`);
+            }
+            
+          } catch (translateError) {
+            retryCount++;
+            console.error(`청크 ${currentChunkIndex} 번역 오류 (시도 ${retryCount}/${validatedMaxRetries + 1}):`, translateError);
+            
+            if (retryCount <= validatedMaxRetries) {
+              console.log(`청크 ${currentChunkIndex} 재시도 중... (${retryCount}/${validatedMaxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, validatedRetryDelay));
+            } else {
+              // 최대 재시도 초과 시 구분자 방식으로 대체 또는 개별 번역
+              console.warn(`청크 ${currentChunkIndex}: 최대 재시도 초과, 구분자 방식으로 대체`);
+              shouldUseSeparator = true;
+              break;
+            }
+          }
+        }
+      }
+      
+      if (shouldUseSeparator || !shouldUseSrtDirect) {
+        // 🔄 구분자 방식 번역
+        const texts = chunk.map(entry => entry.text);
+        const combinedText = texts.join('\n---SUBTITLE_SEPARATOR---\n');
+        
+        console.log(`🔄 구분자 청크 ${currentChunkIndex}/${totalChunks} 번역 시작 (${chunk.length}개 자막, ${combinedText.length}자)`);
+        
+        let result;
+        let translatedTexts = [];
+        let retryCount = 0;
+        
+        while (retryCount <= validatedMaxRetries) {
+        try {
+          result = await translationService.translate(
+            combinedText, 
+            targetLang, 
+            sourceLang, 
+            engine
+          );
+          
+          console.log(`청크 ${currentChunkIndex} 번역 응답 길이: ${result.translatedText.length}자`);
+          
+          // 구분자로 정확하게 분할 시도
+          if (result.translatedText.includes('\n---SUBTITLE_SEPARATOR---\n')) {
+            translatedTexts = result.translatedText.split('\n---SUBTITLE_SEPARATOR---\n');
+          } else if (result.translatedText.includes('---SUBTITLE_SEPARATOR---')) {
+            translatedTexts = result.translatedText.split('---SUBTITLE_SEPARATOR---');
+          } else {
+              // 구분자가 없으면 개별 번역으로 전환
+              console.warn(`청크 ${currentChunkIndex}: 구분자 없음 - 개별 번역으로 전환`);
+            translatedTexts = [];
+            for (let k = 0; k < texts.length; k++) {
+                const individualResult = await translationService.translate(
+                  texts[k],
+                  targetLang,
+                  sourceLang,
+                  engine
+                );
+                translatedTexts.push(individualResult.translatedText);
+              }
+            }
+            
+            if (translatedTexts.length === chunk.length) {
+              console.log(`✅ 구분자 청크 ${currentChunkIndex} 번역 성공: ${translatedTexts.length}개 텍스트 추출`);
+              break;
+            } else {
+              throw new Error(`텍스트 개수 불일치: 예상=${chunk.length}, 실제=${translatedTexts.length}`);
+            }
+          
+        } catch (translateError) {
+          retryCount++;
+            console.error(`청크 ${currentChunkIndex} 번역 오류 (시도 ${retryCount}/${validatedMaxRetries + 1}):`, translateError);
+            
+            if (retryCount <= validatedMaxRetries) {
+              console.log(`청크 ${currentChunkIndex} 재시도 중... (${retryCount}/${validatedMaxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, validatedRetryDelay));
+          } else {
+              // 최대 재시도 횟수 초과 시 개별 번역으로 대체
+              console.warn(`청크 ${currentChunkIndex}: 최대 재시도 초과, 개별 번역으로 대체`);
+              const texts = chunk.map(entry => entry.text);
+            translatedTexts = [];
+            
+            for (let k = 0; k < texts.length; k++) {
+              try {
+                const individualResult = await translationService.translate(
+                  texts[k],
+                  targetLang,
+                  sourceLang,
+                  engine
+                );
+                translatedTexts.push(individualResult.translatedText);
+              } catch (individualError) {
+                  console.error(`개별 번역 실패 (${k}):`, individualError);
+                  if (enableFallback) {
+                    const fallbackResult = await tryFallbackTranslation(texts[k], targetLang, sourceLang, engine);
+                    translatedTexts.push(fallbackResult);
+                  } else {
+                    translatedTexts.push(`[번역실패] ${texts[k]}`);
+                  }
+                }
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      const chunkEndTime = Date.now();
+      const chunkDuration = chunkEndTime - chunkStartTime;
+      console.log(`청크 ${currentChunkIndex} 완료 (${chunkDuration}ms, ${Math.round(chunkChars / (chunkDuration / 1000))}자/초)`);
+
+      // 번역된 텍스트를 각 자막 항목에 할당
+      for (let j = 0; j < chunk.length; j++) {
+        if (j < translatedTexts.length) {
+          // 번역된 텍스트가 여전히 한국어인지 확인
+          const koreanPattern = /[ㄱ-ㅎ|ㅏ-ㅣ|가-힣]/;
+          const translatedText = translatedTexts[j].trim();
+          
+          if (koreanPattern.test(translatedText) && targetLang === 'en') {
+            console.warn(`한국어 감지됨 (${i+j}): "${translatedText.substring(0, 30)}..." - 재번역 시도`);
+            
+            // 개별 재번역 시도
+            try {
+              const reTranslationResult = await translationService.translate(
+                chunk[j].text,
+                targetLang,
+                sourceLang,
+                engine
+              );
+              translatedEntries.push({
+                ...chunk[j],
+                text: reTranslationResult.translatedText.trim()
+              });
+            } catch (reTranslationError) {
+              console.error(`재번역 실패 (${i+j}):`, reTranslationError);
+              if (enableFallback) {
+                const fallbackResult = await tryFallbackTranslation(chunk[j].text, targetLang, sourceLang, engine);
+                translatedEntries.push({
+                  ...chunk[j],
+                  text: fallbackResult
+                });
+              } else {
+                translatedEntries.push({
+                  ...chunk[j],
+                  text: `[번역실패] ${chunk[j].text}`
+                });
+              }
+            }
+          } else {
+            translatedEntries.push({
+              ...chunk[j],
+              text: translatedText
+            });
+          }
+        } else {
+          // 번역된 텍스트가 부족한 경우 원본 유지
+          console.warn(`번역 텍스트 부족 (${i+j}): 원본 유지`);
+          translatedEntries.push(chunk[j]);
+        }
+      }
+
+      totalProcessed += chunk.length;
+      totalProcessedChars += chunkChars;
+      
+      // 진행률 및 성능 통계 계산
+      const progressPercent = Math.round((totalProcessed / entries.length) * 100);
+      const elapsedTime = Date.now() - startTime;
+      const averageCharsPerSecond = Math.round(totalProcessedChars / (elapsedTime / 1000));
+      const remainingChars = totalCharacters - totalProcessedChars;
+      const estimatedTimeRemaining = averageCharsPerSecond > 0 ? Math.round(remainingChars / averageCharsPerSecond) : 0;
+      
+      // 진행 상태 업데이트
+      translationProgress[fileId] = {
+        ...translationProgress[fileId],
+        progress: progressPercent,
+        processedEntries: totalProcessed,
+        processedCharacters: totalProcessedChars,
+        averageCharsPerSecond: averageCharsPerSecond,
+        estimatedTimeRemaining: estimatedTimeRemaining,
+        message: `진행률: ${progressPercent}% (${totalProcessed}/${entries.length}개) - 평균 ${averageCharsPerSecond}자/초`
+      };
+      
+      console.log(`번역 진행률: ${totalProcessed}/${entries.length} (${progressPercent}%) - ${averageCharsPerSecond}자/초, 예상 남은 시간: ${estimatedTimeRemaining}초`);
+
+      // 진행 상태 업데이트
+      translationProgress[fileId].currentChunk = currentChunkIndex;
+      translationProgress[fileId].message = `청크 ${currentChunkIndex}/${totalChunks} 번역 중... (${chunk.length}개 자막, ${chunkChars}자)`;
+
+      try {
+        if (shouldUseSrtDirect) {
+          // 🎯 SRT 청크 직접 번역
+          const srtChunk = SubtitleParser.generateSubtitle(chunk, 'srt');
+          console.log(`🆕 SRT 청크 ${currentChunkIndex}/${totalChunks} 직접 번역 시작 (${chunk.length}개 자막, ${srtChunk.length}자)`);
+          console.log(`SRT 청크 미리보기: ${srtChunk.substring(0, 200)}...`);
+        
+        let result;
+          let translatedTexts = [];
+        let retryCount = 0;
+        
+          // 재시도 로직으로 안정성 강화
+          while (retryCount <= validatedMaxRetries) {
+            try {
+              // SRT 청크 직접 번역
+              result = await translationService.translate(
+                srtChunk, 
+                targetLang, 
+                sourceLang, 
+                engine
+              );
+              
+              console.log(`청크 ${currentChunkIndex} 번역 응답 길이: ${result.translatedText.length}자`);
+              console.log(`청크 ${currentChunkIndex} 번역 응답 미리보기: ${result.translatedText.substring(0, 300)}...`);
+              
+              // 번역된 SRT에서 텍스트만 추출
+              const translatedSrtLines = result.translatedText.split('\n');
+              translatedTexts = [];
+              
+              for (let lineIndex = 0; lineIndex < translatedSrtLines.length; lineIndex++) {
+                const line = translatedSrtLines[lineIndex].trim();
+                
+                // 숫자 라인이면 다음이 타임스탬프, 그 다음이 텍스트
+                if (/^\d+$/.test(line)) {
+                  // 타임스탬프 라인 건너뛰기
+                  lineIndex++;
+                  if (lineIndex < translatedSrtLines.length && translatedSrtLines[lineIndex].includes('-->')) {
+                    lineIndex++;
+                    // 텍스트 라인(들) 수집
+                    let textLines = [];
+                    while (lineIndex < translatedSrtLines.length && 
+                           translatedSrtLines[lineIndex].trim() !== '' && 
+                           !/^\d+$/.test(translatedSrtLines[lineIndex].trim())) {
+                      textLines.push(translatedSrtLines[lineIndex].trim());
+                      lineIndex++;
+                    }
+                    if (textLines.length > 0) {
+                      translatedTexts.push(textLines.join('\n'));
+                    }
+                    lineIndex--; // for 루프에서 증가하므로 하나 빼기
+                  }
+                }
+              }
+              
+              // 추출된 텍스트 개수 확인
+              if (translatedTexts.length === chunk.length) {
+                console.log(`✅ SRT 청크 ${currentChunkIndex} 직접 번역 성공: ${translatedTexts.length}개 텍스트 추출`);
+                break; // 성공하면 루프 탈출
+              } else {
+                throw new Error(`텍스트 개수 불일치: 예상=${chunk.length}, 실제=${translatedTexts.length}`);
+              }
+              
+            } catch (translateError) {
+              retryCount++;
+              console.error(`청크 ${currentChunkIndex} 번역 오류 (시도 ${retryCount}/${validatedMaxRetries + 1}):`, translateError);
+              
+              if (retryCount <= validatedMaxRetries) {
+                console.log(`청크 ${currentChunkIndex} 재시도 중... (${retryCount}/${validatedMaxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, validatedRetryDelay));
+              } else {
+                // 최대 재시도 초과 시 구분자 방식으로 대체 또는 개별 번역
+                console.warn(`청크 ${currentChunkIndex}: 최대 재시도 초과, 구분자 방식으로 대체`);
+                shouldUseSeparator = true;
+                break;
+              }
+            }
+          }
+        }
+      }
+      
+      if (shouldUseSeparator || !shouldUseSrtDirect) {
+        // 🔄 구분자 방식 번역
+        const texts = chunk.map(entry => entry.text);
+        const combinedText = texts.join('\n---SUBTITLE_SEPARATOR---\n');
+        
+        console.log(`🔄 구분자 청크 ${currentChunkIndex}/${totalChunks} 번역 시작 (${chunk.length}개 자막, ${combinedText.length}자)`);
+        
+        let result;
+        let translatedTexts = [];
+        let retryCount = 0;
+        
+        while (retryCount <= validatedMaxRetries) {
+        try {
+          result = await translationService.translate(
+            combinedText, 
+            targetLang, 
+            sourceLang, 
+            engine
+          );
+          
+          console.log(`청크 ${currentChunkIndex} 번역 응답 길이: ${result.translatedText.length}자`);
+          
+          // 구분자로 정확하게 분할 시도
+          if (result.translatedText.includes('\n---SUBTITLE_SEPARATOR---\n')) {
+            translatedTexts = result.translatedText.split('\n---SUBTITLE_SEPARATOR---\n');
+          } else if (result.translatedText.includes('---SUBTITLE_SEPARATOR---')) {
+            translatedTexts = result.translatedText.split('---SUBTITLE_SEPARATOR---');
+          } else {
+              // 구분자가 없으면 개별 번역으로 전환
+              console.warn(`청크 ${currentChunkIndex}: 구분자 없음 - 개별 번역으로 전환`);
+            translatedTexts = [];
+            for (let k = 0; k < texts.length; k++) {
+                const individualResult = await translationService.translate(
+                  texts[k],
+                  targetLang,
+                  sourceLang,
+                  engine
+                );
+                translatedTexts.push(individualResult.translatedText);
+              }
+            }
+            
+            if (translatedTexts.length === chunk.length) {
+              console.log(`✅ 구분자 청크 ${currentChunkIndex} 번역 성공: ${translatedTexts.length}개 텍스트 추출`);
+              break;
+            } else {
+              throw new Error(`텍스트 개수 불일치: 예상=${chunk.length}, 실제=${translatedTexts.length}`);
+            }
+          
+        } catch (translateError) {
+          retryCount++;
+            console.error(`청크 ${currentChunkIndex} 번역 오류 (시도 ${retryCount}/${validatedMaxRetries + 1}):`, translateError);
+            
+            if (retryCount <= validatedMaxRetries) {
+              console.log(`청크 ${currentChunkIndex} 재시도 중... (${retryCount}/${validatedMaxRetries})`);
+              await new Promise(resolve => setTimeout(resolve, validatedRetryDelay));
+          } else {
+              // 최대 재시도 횟수 초과 시 개별 번역으로 대체
+              console.warn(`청크 ${currentChunkIndex}: 최대 재시도 초과, 개별 번역으로 대체`);
+              const texts = chunk.map(entry => entry.text);
+            translatedTexts = [];
+            
+            for (let k = 0; k < texts.length; k++) {
+              try {
+                const individualResult = await translationService.translate(
+                  texts[k],
+                  targetLang,
+                  sourceLang,
+                  engine
+                );
+                translatedTexts.push(individualResult.translatedText);
+              } catch (individualError) {
+                  console.error(`개별 번역 실패 (${k}):`, individualError);
+                  if (enableFallback) {
+                    const fallbackResult = await tryFallbackTranslation(texts[k], targetLang, sourceLang, engine);
+                    translatedTexts.push(fallbackResult);
+                  } else {
+                    translatedTexts.push(`[번역실패] ${texts[k]}`);
+                  }
+                }
+              }
+              break;
+            }
+          }
+        }
+      }
+
+      const chunkEndTime = Date.now();
+      const chunkDuration = chunkEndTime - chunkStartTime;
+      console.log(`청크 ${currentChunkIndex} 완료 (${chunkDuration}ms, ${Math.round(chunkChars / (chunkDuration / 1000))}자/초)`);
+
+      // 번역된 텍스트를 각 자막 항목에 할당
+      for (let j = 0; j < chunk.length; j++) {
+        if (j < translatedTexts.length) {
+          // 번역된 텍스트가 여전히 한국어인지 확인
+          const koreanPattern = /[ㄱ-ㅎ|ㅏ-ㅣ|가-힣]/;
+          const translatedText = translatedTexts[j].trim();
+          
+          if (koreanPattern.test(translatedText) && targetLang === 'en') {
+            console.warn(`한국어 감지됨 (${i+j}): "${translatedText.substring(0, 30)}..." - 재번역 시도`);
+            
+            // 개별 재번역 시도
+            try {
+              const reTranslationResult = await translationService.translate(
+                chunk[j].text,
+                targetLang,
+                sourceLang,
+                engine
+              );
+              translatedEntries.push({
+                ...chunk[j],
+                text: reTranslationResult.translatedText.trim()
+              });
+            } catch (reTranslationError) {
+              console.error(`재번역 실패 (${i+j}):`, reTranslationError);
+              if (enableFallback) {
+                const fallbackResult = await tryFallbackTranslation(chunk[j].text, targetLang, sourceLang, engine);
+                translatedEntries.push({
+                  ...chunk[j],
+                  text: fallbackResult
+                });
+              } else {
+                translatedEntries.push({
+                  ...chunk[j],
+                  text: `[번역실패] ${chunk[j].text}`
+                });
+              }
+            }
+          } else {
+            translatedEntries.push({
+              ...chunk[j],
+              text: translatedText
+            });
+          }
+        } else {
+          // 번역된 텍스트가 부족한 경우 원본 유지
+          console.warn(`번역 텍스트 부족 (${i+j}): 원본 유지`);
+          translatedEntries.push(chunk[j]);
+        }
+      }
+
+      totalProcessed += chunk.length;
+      totalProcessedChars += chunkChars;
+      
+      // 진행률 및 성능 통계 계산
+      const progressPercent = Math.round((totalProcessed / entries.length) * 100);
+      const elapsedTime = Date.now() - startTime;
+      const averageCharsPerSecond = Math.round(totalProcessedChars / (elapsedTime / 1000));
+      const remainingChars = totalCharacters - totalProcessedChars;
+      const estimatedTimeRemaining = averageCharsPerSecond > 0 ? Math.round(remainingChars / averageCharsPerSecond) : 0;
+      
+      // 진행 상태 업데이트
+      translationProgress[fileId] = {
+        ...translationProgress[fileId],
+        progress: progressPercent,
+        processedEntries: totalProcessed,
+        processedCharacters: totalProcessedChars,
+        averageCharsPerSecond: averageCharsPerSecond,
+        estimatedTimeRemaining: estimatedTimeRemaining,
+        message: `진행률: ${progressPercent}% (${totalProcessed}/${entries.length}개) - 평균 ${averageCharsPerSecond}자/초`
+      };
+      
+      console.log(`번역 진행률: ${totalProcessed}/${entries.length} (${progressPercent}%) - ${averageCharsPerSecond}자/초, 예상 남은 시간: ${estimatedTimeRemaining}초`);
+
+    } catch (error) {
+      console.error(`청크 번역 전체 실패 (${i}-${i+maxChunkSize}):`, error);
+      
+      // 번역 실패시 원본 텍스트 유지
+      for (const entry of chunk) {
+        translatedEntries.push({
+          ...entry,
+          originalText: entry.text
+        });
+      }
+      totalProcessed += chunk.length;
+      totalProcessedChars += chunkChars;
+
+      // 진행 상태 업데이트 (오류 반영)
+      const progressPercent = Math.round((totalProcessed / entries.length) * 100);
+      translationProgress[fileId].progress = progressPercent;
+      translationProgress[fileId].processedEntries = totalProcessed;
+      translationProgress[fileId].processedCharacters = totalProcessedChars;
+      translationProgress[fileId].message = `청크 ${currentChunkIndex} 전체 실패 - 원본 텍스트 유지`;
+    }
+
+    // API 호출 간 짧은 지연 (rate limit 방지)
+    if (i + maxChunkSize < entries.length) {
+      await new Promise(resolve => setTimeout(resolve, 200)); // 200ms 대기
+    }
+  }
+
+  const totalTime = Date.now() - startTime;
+  const finalCharsPerSecond = Math.round(totalCharacters / (totalTime / 1000));
+
+  // 진행 상태를 완료로 업데이트
+  translationProgress[fileId] = {
+    ...translationProgress[fileId],
+    status: 'completed',
+    progress: 100,
+    processedEntries: entries.length,
+    processedCharacters: totalCharacters,
+    totalTime: totalTime,
+    averageCharsPerSecond: finalCharsPerSecond,
+    message: '번역 완료'
+  };
+
+  // 출력 형식 결정 (입력 형식과 동일하게 또는 지정된 형식)
+  const finalOutputFormat = outputFormat || parsed.format;
+  
+  // 번역된 자막 파일 생성
+  const translatedContent = SubtitleParser.generateSubtitle(
+    translatedEntries, 
+    finalOutputFormat,
+    { title: `Translated to ${targetLang}` }
+  );
+
+  // 원본 파일명에서 확장자를 제거하고 번역 정보 추가
+  const nameWithoutExt = path.parse(originalName).name;
+  const outputFileName = `${nameWithoutExt}_translated_${targetLang}_${Date.now()}.${finalOutputFormat}`;
+  const outputPath = path.join(__dirname, '../uploads', outputFileName);
+  fs.writeFileSync(outputPath, translatedContent, 'utf8');
+
+  // 번역된 파일의 메타 정보 저장
+  const translatedMetaPath = path.join(__dirname, '../uploads', outputFileName + '.meta');
+  const translatedMetaData = {
+    originalName: `${nameWithoutExt}_translated_${targetLang}.${finalOutputFormat}`,
+    sourceFile: originalName,
+    translationEngine: engine,
+    targetLang: targetLang,
+    timestamp: new Date().toISOString(),
+    translationStats: {
+      totalTime: totalTime,
+      totalCharacters: totalCharacters,
+      averageCharsPerSecond: finalCharsPerSecond,
+      totalEntries: entries.length
+    }
+  };
+  fs.writeFileSync(translatedMetaPath, JSON.stringify(translatedMetaData), 'utf8');
+
+  // 통계 정보
+  const stats = SubtitleParser.getSubtitleStats(translatedEntries);
+
+  res.json({
+    success: true,
+    data: {
+      originalFileId: fileId,
+      translatedFileId: outputFileName,
+      originalFormat: parsed.format,
+      outputFormat: finalOutputFormat,
+      stats: stats,
+      translationEngine: engine,
+      sourceLang: sourceLang || 'auto',
+      targetLang: targetLang,
+      totalEntries: translatedEntries.length,
+      translationOptions: {
+        chunkSize: validatedChunkSize,
+        translationMode: validatedTranslationMode,
+        maxRetries: validatedMaxRetries,
+        retryDelay: validatedRetryDelay,
+        enableFallback: enableFallback
+      },
+      translationStats: {
+        totalTime: totalTime,
+        totalTimeFormatted: `${Math.floor(totalTime / 60000)}분 ${Math.floor((totalTime % 60000) / 1000)}초`,
+        totalCharacters: totalCharacters,
+        averageCharsPerSecond: finalCharsPerSecond,
+        efficiency: `${finalCharsPerSecond}자/초`
+      },
+      preview: translatedEntries.slice(0, 3), // 처음 3개 엔트리 미리보기
+      downloadUrl: `/translation-api/subtitle/download/${outputFileName}`,
+      timestamp: new Date().toISOString()
+    }
+  });
+
+  // 24시간 후 진행 상태 정보 삭제
+  setTimeout(() => {
+    delete translationProgress[fileId];
+  }, 86400000); // 24시간
+
+  // 원본 파일 삭제 (선택사항)
+  // fs.unlinkSync(filePath);
+
+} catch (error) {
+  console.error('자막 번역 오류:', error);
+  
+  // 오류 발생시 진행 상태 업데이트
+  if (translationProgress[req.body.fileId]) {
+    translationProgress[req.body.fileId].status = 'error';
+    translationProgress[req.body.fileId].message = error.message;
+  }
+  
+  res.status(500).json({
+    success: false,
+    error: error.message || '자막 번역 중 오류가 발생했습니다.'
+  });
+}
+});
+
+// 번역된 파일 다운로드
+router.get('/download/:fileId', (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    const filePath = path.join(__dirname, '../uploads', fileId);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        error: '파일을 찾을 수 없습니다.'
+      });
+    }
+
+    const ext = path.extname(fileId);
+    const mimeTypes = {
+      '.srt': 'text/plain',
+      '.smi': 'text/plain',
+      '.vtt': 'text/vtt'
+    };
+
+    res.setHeader('Content-Type', mimeTypes[ext] || 'text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileId}"`);
+    
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+
+    // 다운로드 후 파일 삭제 (1시간 후)
+    setTimeout(() => {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`임시 파일 삭제: ${fileId}`);
+      }
+    }, 3600000); // 1시간
+
+  } catch (error) {
+    console.error('파일 다운로드 오류:', error);
+    res.status(500).json({
+      success: false,
+      error: '파일 다운로드 중 오류가 발생했습니다.'
+    });
+  }
+});
+
+// 업로드된 파일 정보 조회
+router.get('/info/:fileId', (req, res) => {
+  try {
+    const fileId = req.params.fileId;
+    const filePath = path.join(__dirname, '../uploads', fileId);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        error: '파일을 찾을 수 없습니다.'
+      });
+    }
+
+    const parsed = SubtitleParser.parseSubtitle(filePath);
+    const stats = SubtitleParser.getSubtitleStats(parsed.entries);
+
+    res.json({
+      success: true,
+      data: {
+        fileId: fileId,
+        format: parsed.format,
+        stats: stats,
+        entries: parsed.entries
+      }
+    });
+
+  } catch (error) {
+    console.error('파일 정보 조회 오류:', error);
+    res.status(500).json({
+      success: false,
+      error: '파일 정보 조회 중 오류가 발생했습니다.'
+    });
+  }
+});
+
+// 지원 형식 목록
+router.get('/formats', (req, res) => {
+  res.json({
+    success: true,
+    data: {
+      supportedFormats: [
+        { 
+          extension: 'srt', 
+          name: 'SubRip Subtitle',
+          description: '가장 널리 사용되는 자막 형식'
+        },
+        { 
+          extension: 'smi', 
+          name: 'SAMI Subtitle',
+          description: '삼성/MS에서 개발한 자막 형식'
+        },
+        { 
+          extension: 'vtt', 
+          name: 'WebVTT',
+          description: '웹 비디오 텍스트 트랙 형식'
+        }
+      ]
+    }
+  });
+});
+
+// 번역 실패 부분 재번역
+router.post('/retry-failed', async (req, res) => {
+  try {
+    const { fileId, targetLang, sourceLang, engine = 'gemini' } = req.body;
+
+    if (!fileId || !targetLang) {
+      return res.status(400).json({
+        success: false,
+        error: '필수 매개변수가 누락되었습니다.',
+        required: ['fileId', 'targetLang']
+      });
+    }
+
+    // 번역된 파일 경로
+    const filePath = path.join(__dirname, '../uploads', fileId);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({
+        success: false,
+        error: '파일을 찾을 수 없습니다.'
+      });
+    }
+
+    console.log(`번역 실패 부분 재번역 시작: ${fileId} → ${targetLang} (${engine})`);
+
+    // 파일 파싱
+    const parsed = SubtitleParser.parseSubtitle(filePath);
+    const entries = parsed.entries;
+
+    // 번역 실패 항목 찾기
+    const failedEntries = entries.filter(entry => 
+      entry.text.includes('[번역실패]') || 
+      entry.text.includes('[번역누락]')
+    );
+
+    if (failedEntries.length === 0) {
+      return res.json({
+        success: true,
+        message: '번역 실패 항목이 없습니다.',
+        data: {
+          retryCount: 0,
+          totalEntries: entries.length
+        }
+      });
+    }
+
+    console.log(`번역 실패 항목 ${failedEntries.length}개 발견`);
+
+    // 실패한 항목들을 재번역
+    let successCount = 0;
+    let failCount = 0;
+
+    for (let i = 0; i < failedEntries.length; i++) {
+      const entry = failedEntries[i];
+      
+      // 원본 텍스트 추출
+      let originalText = entry.text;
+      if (originalText.startsWith('[번역실패] ')) {
+        originalText = originalText.replace('[번역실패] ', '');
+      } else if (originalText.startsWith('[번역누락] ')) {
+        originalText = originalText.replace('[번역누락] ', '');
+      }
+
+      console.log(`재번역 시도 ${i+1}/${failedEntries.length}: "${originalText.substring(0, 50)}..."`);
+
+      // 같은 엔진으로 재시도
+      let retrySuccess = false;
+      let retryAttempt = 0;
+      const maxRetryAttempts = 5;
+      
+      while (!retrySuccess && retryAttempt <= maxRetryAttempts) {
+        try {
+          const retryResult = await translationService.translate(
+            originalText,
+            targetLang,
+            sourceLang,
+            engine
+          );
+          
+          if (retryResult && retryResult.translatedText && retryResult.translatedText.trim()) {
+            // 재번역 성공
+            entry.text = retryResult.translatedText;
+            successCount++;
+            console.log(`재번역 성공 (시도 ${retryAttempt+1}): "${retryResult.translatedText.substring(0, 50)}..."`);
+            retrySuccess = true;
+          } else {
+            retryAttempt++;
+            if (retryAttempt <= maxRetryAttempts) {
+              console.warn(`재번역 결과 불완전 (시도 ${retryAttempt}): 다시 시도`);
+              await new Promise(resolve => setTimeout(resolve, 500 * retryAttempt));
+            }
+          }
+        } catch (retryError) {
+          retryAttempt++;
+          console.error(`재번역 오류 (시도 ${retryAttempt}):`, retryError);
+          if (retryAttempt <= maxRetryAttempts) {
+            console.log(`재번역 재시도 중... (${retryAttempt}/${maxRetryAttempts})`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryAttempt));
+          }
+        }
+      }
+      
+      if (!retrySuccess) {
+        // 재번역 실패
+        failCount++;
+        console.log(`재번역 최종 실패: 원본 유지`);
+      }
+
+      // API 호출 간 지연
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+
+    // 재번역된 내용으로 파일 업데이트
+    const updatedContent = SubtitleParser.generateSubtitle(
+      entries, 
+      parsed.format,
+      { title: `Retried translation to ${targetLang}` }
+    );
+
+    // 새로운 파일명 생성
+    const nameWithoutExt = path.parse(fileId).name;
+    const outputFileName = `${nameWithoutExt}_retried_${Date.now()}.${path.extname(fileId).substring(1)}`;
+    const outputPath = path.join(__dirname, '../uploads', outputFileName);
+    fs.writeFileSync(outputPath, updatedContent, 'utf8');
+
+    res.json({
+      success: true,
+      data: {
+        originalFileId: fileId,
+        retriedFileId: outputFileName,
+        retryStats: {
+          totalFailedEntries: failedEntries.length,
+          successCount: successCount,
+          failCount: failCount,
+          successRate: Math.round((successCount / failedEntries.length) * 100)
+        },
+        downloadUrl: `/translation-api/subtitle/download/${outputFileName}`,
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error('번역 재시도 오류:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || '번역 재시도 중 오류가 발생했습니다.'
+    });
+  }
+});
+
+module.exports = router; 
