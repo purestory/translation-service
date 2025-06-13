@@ -46,6 +46,22 @@ interface TranslationStats {
   efficiency: string;
 }
 
+interface OllamaStatus {
+  status: 'online' | 'offline';
+  url: string;
+  models: Array<{
+    name: string;
+    size: number;
+    sizeFormatted: string;
+    modified_at: string;
+  }>;
+  modelCount: number;
+  gpuStatus: 'gpu_accelerated' | 'cpu_mode' | 'slow_response' | 'error' | 'unknown';
+  responseTime: number;
+  lastChecked: string;
+  error?: string;
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState<string>("text");
   const [sourceLanguage, setSourceLanguage] = useState<string>("auto");
@@ -78,6 +94,10 @@ function App() {
   const [retryDelay, setRetryDelay] = useState<number>(1000);
   const [enableFallback, setEnableFallback] = useState<boolean>(false);
 
+  // Ollama 상태 관리
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [showOllamaStatus, setShowOllamaStatus] = useState<boolean>(false);
+
   // 엔진과 언어 목록 로드
   useEffect(() => {
     const loadData = async () => {
@@ -106,6 +126,48 @@ function App() {
     };
 
     loadData();
+  }, []);
+
+  // Ollama 상태 확인 함수
+  const checkOllamaStatus = async () => {
+    try {
+      const response = await fetch('/translation-api/translation/ollama/status');
+      const data = await response.json();
+      
+      if (data.success) {
+        setOllamaStatus(data.data);
+      } else {
+        setOllamaStatus({
+          status: 'offline',
+          url: 'http://localhost:11434',
+          models: [],
+          modelCount: 0,
+          gpuStatus: 'unknown',
+          responseTime: 0,
+          lastChecked: new Date().toISOString(),
+          error: data.error
+        });
+      }
+    } catch (error) {
+      setOllamaStatus({
+        status: 'offline',
+        url: 'http://localhost:11434',
+        models: [],
+        modelCount: 0,
+        gpuStatus: 'unknown',
+        responseTime: 0,
+        lastChecked: new Date().toISOString(),
+        error: '서버 연결 실패'
+      });
+    }
+  };
+
+  // 컴포넌트 마운트 시 Ollama 상태 확인
+  useEffect(() => {
+    checkOllamaStatus();
+    // 5분마다 상태 체크
+    const interval = setInterval(checkOllamaStatus, 5 * 60 * 1000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleSwapLanguages = () => {
@@ -405,8 +467,23 @@ function App() {
     <div className="App">
       <div className="container">
         <header className="header">
-          <h1>🌐 Translation Studio</h1>
-          <p>AI 기반 다국어 번역 플랫폼</p>
+          <div className="header-content">
+            <div className="header-text">
+              <h1>🌐 Translation Studio</h1>
+              <p>AI 기반 다국어 번역 플랫폼</p>
+            </div>
+            <div className="header-actions">
+              <button
+                onClick={() => setShowOllamaStatus(!showOllamaStatus)}
+                className={`status-button ${ollamaStatus?.status === 'online' ? 'online' : 'offline'}`}
+                title="Ollama API 상태"
+              >
+                <span className="status-dot"></span>
+                Ollama {ollamaStatus?.status === 'online' ? 'Online' : 'Offline'}
+                {ollamaStatus?.gpuStatus === 'gpu_accelerated' && <span className="gpu-badge">🚀 GPU</span>}
+              </button>
+            </div>
+          </div>
         </header>
 
         <div className="tabs-list">
@@ -425,6 +502,79 @@ function App() {
             📄 자막 파일 번역
           </button>
         </div>
+
+        {/* Ollama 상태 패널 */}
+        {showOllamaStatus && ollamaStatus && (
+          <div className="ollama-status-panel">
+            <div className="status-header">
+              <h3>🤖 Ollama API 상태</h3>
+              <button 
+                onClick={checkOllamaStatus}
+                className="refresh-button"
+                title="상태 새로고침"
+              >
+                🔄
+              </button>
+            </div>
+            
+            <div className="status-grid">
+              <div className="status-item">
+                <span className="label">연결 상태:</span>
+                <span className={`value ${ollamaStatus.status}`}>
+                  {ollamaStatus.status === 'online' ? '🟢 온라인' : '🔴 오프라인'}
+                </span>
+              </div>
+              
+              <div className="status-item">
+                <span className="label">GPU 가속:</span>
+                <span className={`value gpu-${ollamaStatus.gpuStatus}`}>
+                  {ollamaStatus.gpuStatus === 'gpu_accelerated' && '🚀 GPU 가속'}
+                  {ollamaStatus.gpuStatus === 'cpu_mode' && '💻 CPU 모드'}
+                  {ollamaStatus.gpuStatus === 'slow_response' && '⚠️ 느린 응답'}
+                  {ollamaStatus.gpuStatus === 'error' && '❌ 오류'}
+                  {ollamaStatus.gpuStatus === 'unknown' && '❓ 알 수 없음'}
+                </span>
+              </div>
+              
+              <div className="status-item">
+                <span className="label">응답 시간:</span>
+                <span className="value">
+                  {ollamaStatus.responseTime > 0 ? `${ollamaStatus.responseTime}ms` : '-'}
+                </span>
+              </div>
+              
+              <div className="status-item">
+                <span className="label">모델 수:</span>
+                <span className="value">{ollamaStatus.modelCount}개</span>
+              </div>
+            </div>
+
+            {ollamaStatus.models.length > 0 && (
+              <div className="models-section">
+                <h4>📚 로드된 모델</h4>
+                <div className="models-grid">
+                  {ollamaStatus.models.map((model, index) => (
+                    <div key={index} className="model-item">
+                      <div className="model-name">{model.name}</div>
+                      <div className="model-size">{model.sizeFormatted}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {ollamaStatus.error && (
+              <div className="error-section">
+                <h4>❌ 오류</h4>
+                <p>{ollamaStatus.error}</p>
+              </div>
+            )}
+
+            <div className="status-footer">
+              <small>마지막 확인: {new Date(ollamaStatus.lastChecked).toLocaleString()}</small>
+            </div>
+          </div>
+        )}
 
         {activeTab === 'text' && (
           <div className="card">

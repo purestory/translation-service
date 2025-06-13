@@ -556,7 +556,7 @@ ${text}`;
       { code: 'ko', name: '한국어' },
       { code: 'en', name: 'English' },
       { code: 'ja', name: '日本語' },
-      { code: 'zh', name: '中文' },
+      { code: 'zh', name: '中문' },
       { code: 'es', name: 'Español' },
       { code: 'fr', name: 'Français' },
       { code: 'de', name: 'Deutsch' },
@@ -564,6 +564,103 @@ ${text}`;
       { code: 'pt', name: 'Português' },
       { code: 'ru', name: 'Русский' }
     ];
+  }
+
+  // Ollama API 상태 확인
+  async checkOllamaStatus() {
+    try {
+      // Ollama 서비스 상태 확인
+      const statusResponse = await axios.get(`${this.ollamaUrl}/api/tags`, {
+        timeout: 5000
+      });
+
+      // 모델 목록과 상태 가져오기
+      const models = statusResponse.data.models || [];
+      
+      // 각 모델의 상세 정보 수집 (처음 3개만)
+      const modelDetails = await Promise.all(
+        models.slice(0, 3).map(async (model) => {
+          try {
+            const infoResponse = await axios.post(`${this.ollamaUrl}/api/show`, {
+              name: model.name
+            }, { timeout: 3000 });
+            
+            return {
+              name: model.name,
+              size: model.size,
+              sizeFormatted: this.formatBytes(model.size),
+              modified_at: model.modified_at,
+              details: infoResponse.data
+            };
+          } catch (error) {
+            return {
+              name: model.name,
+              size: model.size,
+              sizeFormatted: this.formatBytes(model.size),
+              modified_at: model.modified_at,
+              error: error.message
+            };
+          }
+        })
+      );
+
+      // GPU 사용량 확인 (간단한 테스트 요청)
+      let gpuStatus = 'unknown';
+      let responseTime = 0;
+      try {
+        const testStart = Date.now();
+        await axios.post(`${this.ollamaUrl}/api/generate`, {
+          model: 'sapie:latest',
+          prompt: 'GPU 테스트',
+          stream: false
+        }, { timeout: 15000 });
+        const testEnd = Date.now();
+        responseTime = testEnd - testStart;
+        
+        // 응답 시간으로 GPU 사용 여부 추정
+        if (responseTime < 5000) {
+          gpuStatus = 'gpu_accelerated';
+        } else if (responseTime < 15000) {
+          gpuStatus = 'cpu_mode';
+        } else {
+          gpuStatus = 'slow_response';
+        }
+      } catch (error) {
+        gpuStatus = 'error';
+      }
+
+      return {
+        status: 'online',
+        url: this.ollamaUrl,
+        models: modelDetails,
+        modelCount: models.length,
+        gpuStatus: gpuStatus,
+        responseTime: responseTime,
+        lastChecked: new Date().toISOString()
+      };
+
+    } catch (error) {
+      console.error('Ollama 상태 확인 오류:', error);
+      return {
+        status: 'offline',
+        url: this.ollamaUrl,
+        error: error.message,
+        models: [],
+        modelCount: 0,
+        gpuStatus: 'unknown',
+        responseTime: 0,
+        lastChecked: new Date().toISOString()
+      };
+    }
+  }
+
+  // 바이트를 사람이 읽기 쉬운 형태로 변환
+  formatBytes(bytes) {
+    if (bytes === 0) return '0 Bytes';
+    const k = 1024;
+    const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   }
 }
 

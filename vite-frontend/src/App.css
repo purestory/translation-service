@@ -374,6 +374,252 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* Header Layout */
+.header-content {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.header-text {
+  text-align: left;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Status Button */
+.status-button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  background: rgba(255,255,255,0.1);
+  color: white;
+  backdrop-filter: blur(10px);
+}
+
+.status-button:hover {
+  background: rgba(255,255,255,0.2);
+  transform: translateY(-1px);
+}
+
+.status-button.online {
+  background: rgba(34,197,94,0.2);
+  border: 1px solid rgba(34,197,94,0.3);
+}
+
+.status-button.offline {
+  background: rgba(239,68,68,0.2);
+  border: 1px solid rgba(239,68,68,0.3);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 2s infinite;
+}
+
+.gpu-badge {
+  font-size: 0.7rem;
+  padding: 2px 6px;
+  background: rgba(255,215,0,0.2);
+  border-radius: 10px;
+  border: 1px solid rgba(255,215,0,0.3);
+}
+
+/* Ollama Status Panel */
+.ollama-status-panel {
+  background: white;
+  border-radius: 15px;
+  padding: 20px;
+  margin-bottom: 20px;
+  box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+  border: 1px solid rgba(255,255,255,0.2);
+}
+
+.status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.status-header h3 {
+  margin: 0;
+  color: #374151;
+  font-size: 1.2rem;
+}
+
+.refresh-button {
+  background: transparent;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 5px;
+  border-radius: 5px;
+  transition: all 0.3s ease;
+}
+
+.refresh-button:hover {
+  background: rgba(102,126,234,0.1);
+  transform: rotate(180deg);
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+  margin-bottom: 20px;
+}
+
+.status-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 15px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border-left: 4px solid #e5e7eb;
+}
+
+.status-item .label {
+  font-weight: 500;
+  color: #6b7280;
+}
+
+.status-item .value {
+  font-weight: 600;
+  color: #374151;
+}
+
+.status-item .value.online {
+  color: #059669;
+}
+
+.status-item .value.offline {
+  color: #dc2626;
+}
+
+.status-item .value.gpu-gpu_accelerated {
+  color: #059669;
+}
+
+.status-item .value.gpu-cpu_mode {
+  color: #d97706;
+}
+
+.status-item .value.gpu-slow_response {
+  color: #dc2626;
+}
+
+.status-item .value.gpu-error {
+  color: #dc2626;
+}
+
+.status-item .value.gpu-unknown {
+  color: #6b7280;
+}
+
+/* Models Section */
+.models-section {
+  margin-bottom: 20px;
+}
+
+.models-section h4 {
+  margin: 0 0 10px 0;
+  color: #374151;
+  font-size: 1rem;
+}
+
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 10px;
+}
+
+.model-item {
+  padding: 10px 15px;
+  background: #f1f5f9;
+  border-radius: 8px;
+  border-left: 4px solid #667eea;
+}
+
+.model-name {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 4px;
+}
+
+.model-size {
+  font-size: 0.9rem;
+  color: #6b7280;
+}
+
+/* Error Section */
+.error-section {
+  margin-bottom: 20px;
+}
+
+.error-section h4 {
+  margin: 0 0 10px 0;
+  color: #dc2626;
+  font-size: 1rem;
+}
+
+.error-section p {
+  color: #dc2626;
+  background: #fef2f2;
+  padding: 10px 15px;
+  border-radius: 8px;
+  border-left: 4px solid #dc2626;
+  margin: 0;
+}
+
+/* Status Footer */
+.status-footer {
+  text-align: center;
+  padding-top: 15px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.status-footer small {
+  color: #6b7280;
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  .header-content {
+    flex-direction: column;
+    gap: 15px;
+  }
+  
+  .header-text {
+    text-align: center;
+  }
+  
+  .status-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .models-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Responsive */
 @media (max-width: 768px) {
   #root {

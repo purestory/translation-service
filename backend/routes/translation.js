@@ -192,4 +192,21 @@ router.post('/batch', async (req, res) => {
   }
 });
 
+// Ollama API 상태 확인
+router.get('/ollama/status', async (req, res) => {
+  try {
+    const status = await translationService.checkOllamaStatus();
+    res.json({
+      success: true,
+      data: status
+    });
+  } catch (error) {
+    console.error('Ollama 상태 확인 오류:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Ollama 상태를 확인할 수 없습니다.'
+    });
+  }
+});
+
 module.exports = router; 
